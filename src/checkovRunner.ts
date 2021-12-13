@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import { Logger } from 'winston';
-import { CheckovInstallation } from './checkovInstaller';
+import { CheckovInstallation, KicsInstallation } from './checkovInstaller';
 import { convertToUnixPath, getGitRepoName, getDockerPathParams, runVersionCommand } from './utils';
 
 export interface FailedCheckovCheck {
@@ -133,6 +133,79 @@ export const runCheckovScan = (logger: Logger, checkovInstallation: CheckovInsta
 
             cancelToken.onCancellationRequested((cancelEvent) => {
                 ckv.kill('SIGABRT');
+                logger.info('Cancellation token invoked, aborting checkov run.', { cancelEvent });
+            });
+        });
+    });
+};
+
+export const runKicsScan = (logger: Logger, kicsInstallation: KicsInstallation, extensionVersion: string, fileName: string, token: string, 
+    certPath: string | undefined, useBcIds: boolean | undefined, cancelToken: vscode.CancellationToken, configPath: string | null, kicsVersion: string, prismaUrl: string | undefined): Promise<CheckovResponse> => {
+    return new Promise((resolve, reject) => {   
+        const { kicsInstallationMethod, kicsPath } = kicsInstallation;
+
+        const dockerRunParams = kicsInstallationMethod === 'docker' ? getDockerRunParams(vscode.workspace.rootPath, fileName, extensionVersion, configPath, kicsInstallation.version) : [];
+        const pipRunParams =  ['pipenv', 'pip3'].includes(kicsInstallationMethod) ? getpipRunParams(configPath) : [];
+        const filePathParams = kicsInstallationMethod === 'docker' ? [] : ['-f', `"${fileName}"`];
+        const certificateParams: string[] = certPath ? ['-ca', `"${certPath}"`] : [];
+        const bcIdParam: string[] = useBcIds ? ['--output-bc-ids'] : [];
+        const workingDir = vscode.workspace.rootPath;
+        getGitRepoName(logger, vscode.window.activeTextEditor?.document.fileName).then((repoName) => {
+            const kicsArguments: string[] = [...dockerRunParams, ...certificateParams, ...bcIdParam, '-s', '--bc-api-key', token, '--repo-id', 
+                repoName, ...filePathParams, '-o', 'json', ...pipRunParams];
+            logger.info('Running checkov:');
+            logger.info(`${kicsPath} ${kicsArguments.map(argument => argument === token ? '****' : argument).join(' ')}`);
+        
+            runVersionCommand(logger, kicsPath, kicsVersion);
+        
+            const kcs = spawn(kicsPath, kicsArguments,
+                {
+                    shell: true,
+                    env: { ...process.env, BC_SOURCE: 'vscode', BC_SOURCE_VERSION: extensionVersion, PRISMA_API_URL: prismaUrl },
+                    ...(workingDir ? { cwd: workingDir } : {})
+                });
+
+            let stdout = '';
+
+            kcs.stdout.on('data', data => {
+                if (data.toString().startsWith('{') || data.toString().startsWith('[') || stdout) {
+                    stdout += data;
+                } else {
+                    logger.debug(`Log from Checkov: ${data}`);
+                }
+            });
+
+            kcs.stderr.on('data', data => {
+                logger.warn(`Checkov stderr: ${data}`);
+            });
+
+            kcs.on('error', (error) => {
+                logger.error('Error while running Checkov', { error });
+            });
+
+            kcs.on('close', code => {
+                try {
+                    if (cancelToken.isCancellationRequested) return reject('Cancel invoked');
+                    logger.debug(`Checkov scan process exited with code ${code}`);
+                    logger.debug('Checkov task output:', { stdout });
+                    if (code !== 0) return reject(`Checkov exited with code ${code}`);
+
+                    if (stdout.startsWith('[]')) {
+                        logger.debug('Got an empty reply from checkov', { reply: stdout, fileName });
+                        return resolve({ results: { failedChecks: [] } });
+                    }
+
+                    const cleanStdout = cleanupStdout(stdout);
+                    const output: CheckovResponseRaw = JSON.parse(cleanStdout);
+                    resolve(parseCheckovResponse(output, useBcIds));
+                } catch (error) {
+                    logger.error('Failed to get response from Checkov.', { error });
+                    reject('Failed to get response from Checkov.');
+                }
+            });
+
+            cancelToken.onCancellationRequested((cancelEvent) => {
+                kcs.kill('SIGABRT');
                 logger.info('Cancellation token invoked, aborting checkov run.', { cancelEvent });
             });
         });

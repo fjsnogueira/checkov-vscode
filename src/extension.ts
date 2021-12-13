@@ -2,14 +2,31 @@ import * as vscode from 'vscode';
 import { TextEncoder } from 'util';
 import debounce from 'lodash/debounce';
 import { Logger } from 'winston';
-import { CheckovInstallation, installOrUpdateCheckov } from './checkovInstaller';
+import { CheckovInstallation, KicsInstallation, installOrUpdateCheckov, installOrUpdateKics } from './checkovInstaller';
 import { runCheckovScan } from './checkovRunner';
 import { applyDiagnostics } from './diagnostics';
 import { fixCodeActionProvider, providedCodeActionKinds } from './suggestFix';
 import { getLogger, saveCheckovResult, isSupportedFileType, extensionVersion, runVersionCommand } from './utils';
-import { initializeStatusBarItem, setErrorStatusBarItem, setPassedStatusBarItem, setReadyStatusBarItem, setSyncingStatusBarItem, showAboutCheckovMessage, showContactUsDetails } from './userInterface';
-import { assureTokenSet, getCheckovVersion, shouldDisableErrorMessage, getPathToCert, getUseBcIds, getPrismaUrl } from './configuration';
-import { GET_INSTALLATION_DETAILS_COMMAND, INSTALL_OR_UPDATE_CHECKOV_COMMAND, OPEN_CHECKOV_LOG, OPEN_CONFIGURATION_COMMAND, OPEN_EXTERNAL_COMMAND, REMOVE_DIAGNOSTICS_COMMAND, RUN_FILE_SCAN_COMMAND } from './commands';
+import { initializeStatusBarItem, setErrorStatusBarItem, setPassedStatusBarItem, setReadyStatusBarItem, setSyncingStatusBarItem, showAboutCheckovMessage, showContactUsDetails,
+    setKicsSyncingStatusBarItem, setKicsErrorStatusBarItem, showKicsContactUsDetails } from './userInterface';
+import { assureTokenSet, getCheckovVersion, getKicsVersion, shouldDisableErrorMessage, getPathToCert, getUseBcIds, getPrismaUrl } from './configuration';
+import { 
+    GET_INSTALLATION_DETAILS_COMMAND, 
+    INSTALL_OR_UPDATE_CHECKOV_COMMAND, 
+    OPEN_CHECKOV_LOG, 
+    OPEN_CONFIGURATION_COMMAND, 
+    OPEN_EXTERNAL_COMMAND, 
+    REMOVE_DIAGNOSTICS_COMMAND, 
+    RUN_FILE_SCAN_COMMAND,
+    
+    KICS_OPEN_EXTERNAL_COMMAND,         
+    KICS_RUN_FILE_SCAN_COMMAND,       
+    KICS_REMOVE_DIAGNOSTICS_COMMAND,      
+    KICS_OPEN_CONFIGURATION_COMMAND,      
+    KICS_INSTALL_OR_UPDATE_KICS_COMMAND,  
+    KICS_GET_INSTALLATION_DETAILS_COMMAND,
+    KICS_OPEN_KICS_LOG                    
+} from './commands';
 import { getConfigFilePath } from './parseCheckovConfig';
 
 export const CHECKOV_MAP = 'checkovMap';
@@ -25,7 +42,10 @@ export function activate(context: vscode.ExtensionContext): void {
     let extensionReady = false;
     let checkovRunCancelTokenSource = new vscode.CancellationTokenSource();
     let checkovInstallation : CheckovInstallation | null = null;
+    let kicsInstallation : KicsInstallation | null = null;
+
     const checkovInstallationDir = vscode.Uri.joinPath(context.globalStorageUri, 'checkov-installation').fsPath;
+    const kicsInstallationDir = vscode.Uri.joinPath(context.globalStorageUri, 'kics-installation').fsPath;
 
     const resetCancelTokenSource = () => {
         checkovRunCancelTokenSource.cancel();
@@ -57,6 +77,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 !shouldDisableErrorMessage() && showContactUsDetails(context.logUri, logFileName);
             }
         }),
+
         vscode.commands.registerCommand(RUN_FILE_SCAN_COMMAND, async (fileUri?: vscode.Uri): Promise<void> => {
             if (!extensionReady) {
                 logger.warn('Tried to scan before checkov finished installing or updating. Please wait a few seconds and try again.');
@@ -176,4 +197,72 @@ export function activate(context: vscode.ExtensionContext): void {
             !shouldDisableErrorMessage() && showContactUsDetails(context.logUri, logFileName);
         }
     }, 300, {});
+
+    // Set KICS commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand(KICS_INSTALL_OR_UPDATE_KICS_COMMAND, async () => {
+            try {
+                extensionReady = false;
+                setKicsSyncingStatusBarItem(kicsInstallation?.version, 'Updating Kics');
+                const kicsVersion = getKicsVersion();
+                kicsInstallation =  await installOrUpdateKics(logger, kicsInstallationDir, kicsVersion);
+                logger.info('Kics installation: ', kicsInstallation);
+                kicsInstallation.version = await runVersionCommand(logger, kicsInstallation.kicsPath, kicsVersion);
+                setReadyStatusBarItem(kicsInstallation.version);
+                extensionReady = true;
+                if (vscode.window.activeTextEditor && isSupportedFileType(vscode.window.activeTextEditor.document.fileName))
+                    vscode.commands.executeCommand(RUN_FILE_SCAN_COMMAND);
+            } catch(error) {
+                setKicsErrorStatusBarItem(kicsInstallation?.version);
+                logger.error('Error occurred while preparing Kics. Verify your settings, or try to reload vscode.', { error });
+                !shouldDisableErrorMessage() && showKicsContactUsDetails(context.logUri, logFileName);
+            }
+        }),
+
+        vscode.commands.registerCommand(KICS_RUN_FILE_SCAN_COMMAND, async (fileUri?: vscode.Uri): Promise<void> => {
+            if (!extensionReady) {
+                logger.warn('Tried to scan before kics finished installing or updating. Please wait a few seconds and try again.');
+                vscode.window.showWarningMessage('Still installing/updating kics, please wait a few seconds and try again.', 'Got it');
+                return;
+            }
+            resetCancelTokenSource();
+            const token = assureTokenSet(logger, OPEN_CONFIGURATION_COMMAND, checkovInstallation);
+            const prismaUrl = getPrismaUrl();
+            const certPath = getPathToCert();
+            const useBcIds = getUseBcIds();
+            const checkovVersion = getCheckovVersion();
+            vscode.commands.executeCommand(REMOVE_DIAGNOSTICS_COMMAND);
+            if (!fileUri && vscode.window.activeTextEditor && !isSupportedFileType(vscode.window.activeTextEditor.document.fileName, true))
+                return;
+            if (!!token && vscode.window.activeTextEditor) {
+                await runScan(vscode.window.activeTextEditor, token, certPath, useBcIds, checkovRunCancelTokenSource.token, checkovVersion, prismaUrl, fileUri);
+            }
+        }),
+
+        vscode.commands.registerCommand(KICS_REMOVE_DIAGNOSTICS_COMMAND, () => {
+            if (vscode.window.activeTextEditor) {
+                setReadyStatusBarItem(checkovInstallation?.version);
+                applyDiagnostics(vscode.window.activeTextEditor.document, diagnostics, []);
+            }
+        }),
+
+        vscode.commands.registerCommand(KICS_OPEN_CONFIGURATION_COMMAND, () => {
+            vscode.commands.executeCommand('workbench.action.openSettings', '@ext:Bridgecrew.checkov');
+        }),
+
+        vscode.commands.registerCommand(KICS_OPEN_EXTERNAL_COMMAND, (uri: vscode.Uri) => vscode.env.openExternal(uri)),
+        
+        vscode.commands.registerCommand(KICS_GET_INSTALLATION_DETAILS_COMMAND, async () => {
+            if (!checkovInstallation || !checkovInstallation.version) {
+                vscode.window.showWarningMessage("Checkov has not been installed. Try waiting a few seconds or running the 'Install or Update Checkov' command");
+            } else {
+                await showAboutCheckovMessage(checkovInstallation.version, checkovInstallation.checkovInstallationMethod);
+            }
+        }),
+        vscode.commands.registerCommand(KICS_OPEN_KICS_LOG, async () => {
+            vscode.window.showTextDocument(vscode.Uri.joinPath(context.logUri, logFileName));
+        })
+    );
+
+    //vscode.commands.executeCommand(KICS_INSTALL_OR_UPDATE_KICS_COMMAND);
 }

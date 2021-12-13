@@ -4,6 +4,15 @@ import * as os from 'os';
 import { Logger } from 'winston';
 import { asyncExec, isWindows } from './utils';
 
+const isCurlKicsInstalledGlobally = async () => {
+    try {
+        await asyncExec('kics --version');
+        return true;
+    } catch (err) {
+        return false;
+    }
+};
+
 const isPipCheckovInstalledGlobally = async () => {
     try {
         await asyncExec('checkov --version');
@@ -11,6 +20,26 @@ const isPipCheckovInstalledGlobally = async () => {
     } catch (err) {
         return false;
     }
+};
+
+const getCurlKicsExecutablePath = async (logger: Logger): Promise<string> => {
+    if (!isWindows) {
+        const [pythonUserBaseOutput] = await asyncExec('python3 -c "import site; print(site.USER_BASE)"');
+        logger.debug(`User base output: ${pythonUserBaseOutput}`);
+        return path.join(pythonUserBaseOutput.trim(), 'bin', 'kics');
+    } else {
+        // Windows has issues with the approach above (no surprise), but we can get to site-packages and from there to the executable
+        const [showCheckovOutput] = await asyncExec('pip3 show checkov');
+        for (const line of showCheckovOutput.split(os.EOL)) {
+            if (line.startsWith('Location: ')) {
+                logger.debug(line);
+                const sitePackagePath = line.split(' ')[1];
+                return path.join(path.dirname(sitePackagePath), 'Scripts', 'checkov');
+            }
+        }
+    }
+
+    throw new Error('Failed to find the path to the non-global kics executable');
 };
 
 const getPipCheckovExecutablePath = async (logger: Logger): Promise<string> => {
@@ -31,6 +60,36 @@ const getPipCheckovExecutablePath = async (logger: Logger): Promise<string> => {
     }
 
     throw new Error('Failed to find the path to the non-global checkov executable');
+};
+
+const installOrUpdateKicsWithCurl = async (logger: Logger, kicsVersion: string): Promise<string | null> => {
+    logger.info('Trying to install Kics using curl.');
+
+    kicsVersion = '1.4.8';
+
+    try {
+        const command = 
+        'wget --quiet "curl -s https://github.com/Checkmarx/kics/releases/download/'+kicsVersion+'/kics_'+kicsVersion+'_linux_x64.tar.gz"\n' +
+        'mkdir -p kics_zip\n' +
+        'tar xfz kics*_linux_x64.tar.gz -C kics_zip\n' +
+        'zip -qr kics.zip kics_zip\n';
+
+        logger.debug(`Testing kics curl installation with command: ${command}`);
+        
+        await asyncExec(command);
+
+        let kicsPath;
+        if (await isCurlKicsInstalledGlobally()) {
+            kicsPath = 'kics';
+        } else {
+            kicsPath = await getCurlKicsExecutablePath(logger);
+        }
+        logger.info('Kics installed successfully using curl.', { checkovPath: kicsPath });
+        return kicsPath;
+    } catch (error) {
+        logger.error('Failed to install or update kics using curl. Error:', { error });
+        return null;
+    }
 };
 
 const installOrUpdateCheckovWithPip3 = async (logger: Logger, checkovVersion: string): Promise<string | null> => {
@@ -90,6 +149,23 @@ const installOrUpdateCheckovWithPipenv = async (logger: Logger, installationDir:
     }
 };
 
+const installOrUpdateKicsWithDocker = async (logger: Logger, kicsVersion: string): Promise<string | null> => {
+    
+    logger.info('Trying to install Checkov using Docker.');
+    try {
+        const command = `docker pull bridgecrew/checkov:${kicsVersion}`;
+        logger.debug(`Testing docker installation with command: ${command}`);
+        await asyncExec(command);
+        
+        const kicsPath = 'docker';
+        logger.info('Kics installed successfully using Docker.', { kicsPath });
+        return kicsPath;
+    } catch (error) {
+        logger.error('Failed to install or update Kics using Docker. Error: ', { error });
+        return null;
+    }
+};
+
 const installOrUpdateCheckovWithDocker = async (logger: Logger, checkovVersion: string): Promise<string | null> => {
     
     logger.info('Trying to install Checkov using Docker.');
@@ -107,6 +183,13 @@ const installOrUpdateCheckovWithDocker = async (logger: Logger, checkovVersion: 
     }
 };
 
+type KicsInstallationMethod = 'curl' | 'docker';
+export interface KicsInstallation {
+    kicsInstallationMethod: KicsInstallationMethod;
+    kicsPath: string;
+    version?: string;
+}
+
 type CheckovInstallationMethod = 'pip3' | 'pipenv' | 'docker';
 export interface CheckovInstallation {
     checkovInstallationMethod: CheckovInstallationMethod;
@@ -122,5 +205,13 @@ export const installOrUpdateCheckov = async (logger: Logger, installationDir: st
     const pipenvCheckovPath = await installOrUpdateCheckovWithPipenv(logger, installationDir, checkovVersion);
     if (pipenvCheckovPath) return { checkovInstallationMethod: 'pipenv' , checkovPath: pipenvCheckovPath };
 
+    throw new Error('Could not install Checkov.');
+};
+
+export const installOrUpdateKics = async (logger: Logger, installationDir: string, kicsVersion: string): Promise<KicsInstallation> => {
+    const dockerKicsPath = await installOrUpdateKicsWithDocker(logger, kicsVersion);
+    if (dockerKicsPath) return { kicsInstallationMethod: 'docker' , kicsPath: dockerKicsPath };
+    const curlKicsPath = await installOrUpdateKicsWithCurl(logger, kicsVersion);
+    if (curlKicsPath) return { kicsInstallationMethod: 'curl' , kicsPath: curlKicsPath };
     throw new Error('Could not install Checkov.');
 };

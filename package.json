@@ -52,6 +52,27 @@
       {
         "command": "checkov.open-log",
         "title": "Open Checkov Log"
+      },
+      
+      {
+        "command": "kics.scan-file",
+        "title": "Kics Scan"
+      },
+      {
+        "command": "kics.install-or-update-kics",
+        "title": "Install or Update Kics"
+      },
+      {
+        "command": "kics.configuration.open",
+        "title": "Open kics Settings"
+      },
+      {
+        "command": "kics.about-kics",
+        "title": "About Kics"
+      },
+      {
+        "command": "kics.open-log",
+        "title": "Open kics Log"
       }
     ],
     "configuration": {
@@ -79,6 +100,12 @@
           "title": "Checkov version",
           "type": "string",
           "markdownDescription": "The Checkov scanner version to use (e.g., 2.0.123). Enter 'latest' or leave blank to always use the latest version. Be sure to run the 'Install or Update Checkov' command after changing this value. Use the 'About Checkov' command to view the current version.",
+          "readOnly": true
+        },
+        "checkov.kicsVersion": {
+          "title": "Kics version",
+          "type": "string",
+          "markdownDescription": "The Kics scanner version to use (e.g., 1.4.8). Enter 'latest' or leave blank to always use the latest version. Be sure to run the 'Install or Update Kics' command after changing this value. Use the 'About Kics' command to view the current version.",
           "readOnly": true
         },
         "checkov.disableErrorMessage": {

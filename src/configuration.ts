@@ -6,6 +6,7 @@ import { CheckovInstallation } from './checkovInstaller';
 import { getTokenType } from './utils';
 
 const minCheckovVersion = '2.0.0';
+const minKicsVersion = '1.4.8';
 
 export const assureTokenSet = (logger: Logger, openConfigurationCommand: string, checkovInstallation: CheckovInstallation | null): string | undefined => {
     // Read configuration
@@ -57,6 +58,31 @@ export const getCheckovVersion = (): string => {
 
         if (!semver.satisfies(checkovVersion, `>=${minCheckovVersion}`)) {
             throw Error(`Invalid checkov version: ${checkovVersion} (must be >=${minCheckovVersion})`);
+        }
+
+        return clean;
+    }
+};
+
+export const getKicsVersion = (): string => {
+
+    const configuration: vscode.WorkspaceConfiguration = vscode.workspace.getConfiguration('checkov');
+    const kicsVersion = configuration.get<string>('kicsVersion', 'latest').trim().toLowerCase();
+
+    if (kicsVersion === '' || kicsVersion === 'latest') {
+        return 'latest';
+    } else {
+        if (!semver.valid(kicsVersion)) {
+            throw Error(`Invalid kics version: ${kicsVersion}`);
+        }
+        
+        const clean = semver.clean(kicsVersion);
+        if (!clean) {
+            throw Error(`Invalid kics version: ${kicsVersion}`);
+        }
+
+        if (!semver.satisfies(kicsVersion, `>=${minKicsVersion}`)) {
+            throw Error(`Invalid kics version: ${kicsVersion} (must be >=${minKicsVersion})`);
         }
 
         return clean;
